@@ -1,52 +1,208 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
+	"time"
 )
 
+const LinePrefix = "zero: "
+
+var ErrUserCancelled = fmt.Errorf("Cancelled")
+var ErrMaxRetries = fmt.Errorf("Took too long")
+
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "usage: floor zt_net zt_token [-iface]\n")
+	fmt.Fprintf(os.Stderr, "usage: zero [-name] [-iface] [-install-dir] zt_net zt_token\n")
 }
 
-func waitForDaemon(exit chan os.Signal, start bool) error {
-	//wait for daemon to be up
+func prefixLines(out io.Writer, prefix string) io.Writer {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+
+	go func() {
+		defer pr.Close()
+		scanner := bufio.NewScanner(pr)
+		for scanner.Scan() {
+			fmt.Fprintf(out, "%s%s\n", prefix, scanner.Text())
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Fatalf("Error piping prefix: %v", err)
+		}
+	}()
+
+	return pw
+}
+
+func WaitForDaemon(exit chan os.Signal, start bool, installDir string) error {
+	if start {
+		path := filepath.Join(installDir, "zerotier-one")
+		log.Printf("Also starting '%s'...", path)
+		cmd := exec.Command(path, "-d")
+		cmd.Stdout = prefixLines(os.Stdout, fmt.Sprintf("%s%s", LinePrefix, "(zerotier-one) "))
+		cmd.Stderr = prefixLines(os.Stdout, fmt.Sprintf("%s%s", LinePrefix, "(zerotier-one) "))
+		err := cmd.Run()
+		if err != nil {
+			return err
+		}
+	}
+
+	retries := 0
+	for {
+		if retries >= 10 {
+			return ErrMaxRetries
+		}
+
+		fis, err := ioutil.ReadDir(installDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				log.Fatalf("The ZeroTier installation directory '%s' doesn't exist, did you install it somewhere else?", installDir)
+			} else {
+				log.Fatalf("Failed to read zerotier-one installation dir '%s': %v", installDir, err)
+			}
+
+		}
+
+		for _, fi := range fis {
+			if fi.Name() == "authtoken.secret" {
+				return nil //we're done waiting
+			}
+		}
+
+		retries += 1
+		select {
+		case <-exit:
+			return ErrUserCancelled
+		case <-time.After(time.Millisecond * 200):
+		}
+	}
 
 	return nil
 }
 
-func joinNetwork(netid string) (string, error) {
-	//execute join
+func JoinNetwork(exit chan os.Signal, netid, installDir string) (string, error) {
+	cmd := exec.Command("zerotier-cli", "join", netid)
+	cmd.Stdout = prefixLines(os.Stdout, fmt.Sprintf("%s%s", LinePrefix, "(zerotier-cli) "))
+	cmd.Stderr = prefixLines(os.Stdout, fmt.Sprintf("%s%s", LinePrefix, "(zerotier-cli) "))
+	err := cmd.Run()
+	if err != nil {
+		return "", err
+	}
 
-	//wait for identity file
+	idpath := filepath.Join(installDir, "identity.public")
+	retries := 0
+	for {
+		if retries >= 10 {
+			return "", ErrMaxRetries
+		}
+
+		data, err := ioutil.ReadFile(idpath)
+		if err != nil && os.IsExist(err) {
+			log.Fatalf("Unexpected error reading file '%s': %v", idpath, err)
+		} else if data != nil {
+			memberid := string(data[:10])
+			return memberid, nil //we're done
+		}
+
+		retries += 1
+		select {
+		case <-exit:
+			return "", ErrUserCancelled
+		case <-time.After(time.Millisecond * 200):
+		}
+	}
 
 	return "", nil
 }
 
-func authorizeMember(memberid, netid, token string) error {
-	//call http api
+func AuthorizeMember(memberid, membername, netid, endpoint, token string) error {
+	loc := fmt.Sprintf("%snetwork/%s/member/%s", endpoint, netid, memberid)
+	req, err := http.NewRequest("POST", loc, strings.NewReader(fmt.Sprintf(`{"config":{"authorized": true}, "annot": {"description": "%s"}}`, membername)))
+	if err != nil {
+		return fmt.Errorf("Failed to create request: %s", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+
+	defer resp.Body.Close()
+	if resp.StatusCode > 299 {
+		return fmt.Errorf("Failed to update member details '%v': %s", req.Header, resp.Status)
+	}
 
 	return nil
 }
 
-func waitForIP(exit chan os.Signal, iface string) (net.IP, error) {
-	//wait for an ip on iface
+func WaitForIP(exit chan os.Signal, iface string) (net.IP, error) {
+	retries := 0
+	for {
+		if retries >= 400 {
+			return nil, ErrMaxRetries
+		}
+
+		i, err := net.InterfaceByName(iface)
+		if err != nil {
+			return nil, err
+		}
+
+		addrs, err := i.Addrs()
+		if err != nil {
+			return nil, err
+		}
+
+		if len(addrs) > 1 {
+			for _, addr := range addrs {
+				ip, _, err := net.ParseCIDR(addr.String())
+				if err != nil {
+					log.Fatalf("Failed to parse received addr '%s' as CIDR: %v", addr, err)
+				}
+
+				if ip.To4() != nil {
+					return ip, nil
+				}
+			}
+		}
+
+		retries += 1
+		select {
+		case <-exit:
+			return nil, ErrUserCancelled
+		case <-time.After(time.Millisecond * 200):
+		}
+	}
 
 	return net.IP{}, nil
 }
 
 var iface = flag.String("iface", "zt0", "The network interface that is expected receive an address")
-var startDaemon = flag.Bool("start-daemon", false, "Also start the daemon (zerotier-one -d), this is for testing only")
+var name = flag.String("name", "", "Give this member a descriptive name upon authorizing")
+var startDaemon = flag.Bool("start-daemon", false, "Also start the daemon (-d): this is for testing only")
+var installDir = flag.String("install-dir", "/var/lib/zerotier-one", "Where zerotier is installed")
+var endpoint = flag.String("api-endpoint", "https://my.zerotier.com/api/", "Location of the ZeroTier API")
 
 func main() {
 	flag.Parse()
 	exit := make(chan os.Signal, 1)
 	signal.Notify(exit, os.Interrupt, os.Kill)
-	log.SetPrefix("zero: ")
+	log.SetPrefix(LinePrefix)
 	log.SetFlags(0)
 
 	netid := flag.Arg(0)
@@ -62,28 +218,28 @@ func main() {
 	}
 
 	log.Printf("Waiting for ZeroTier Daemon to be up...")
-	err := waitForDaemon(exit, *startDaemon)
+	err := WaitForDaemon(exit, *startDaemon, *installDir)
 	if err != nil {
 		log.Fatalf("Failed to wait for Daemon: %v", err)
 	}
 
 	log.Printf("Joining network '%s'...", netid)
-	memberid, err := joinNetwork(netid)
+	memberid, err := JoinNetwork(exit, netid, *installDir)
 	if err != nil {
 		log.Fatalf("Failed to join ZeroTier network '%s': %v", netid, err)
 	}
 
-	log.Printf("Authorizing member '%s'...", memberid)
-	err = authorizeMember(memberid, netid, token)
+	log.Printf("Authorizing member '%s' as '%s'...", memberid, *name)
+	err = AuthorizeMember(memberid, *name, netid, *endpoint, token)
 	if err != nil {
 		log.Fatalf("Failed to authorize member '%s': %v", memberid, err)
 	}
 
 	log.Printf("Waiting for network address on interface '%s'...", *iface)
-	ip, err := waitForIP(exit, *iface)
+	ip, err := WaitForIP(exit, *iface)
 	if err != nil {
-		log.Fatalf("Failed to receive network address on '%s': %v", iface, err)
+		log.Fatalf("Failed to receive network address on '%s': %v", *iface, err)
 	}
 
-	log.Printf("Done: Received address '%s'!", ip.String())
+	log.Printf("Done! Received address '%s'", ip.String())
 }

@@ -11,7 +11,7 @@ function run_build_container {
 }
 
 # run a Linux test environment
-function run_run {
+function run_test {
   : "${ZT_NET:?ZT_NET environment variable needs to be set in order to test}"
   : "${ZT_TOKEN:?ZT_TOKEN environment variable needs to be set in order to test}"
 
@@ -19,10 +19,10 @@ function run_run {
   docker run -it --rm \
     --device=/dev/net/tun \
     --cap-add=NET_ADMIN \
-    microfactory/zero:`cat VERSION` $ZT_NET $ZT_TOKEN
+    microfactory/zero:`cat VERSION` -start-daemon -name=test-member $ZT_NET $ZT_TOKEN
 }
 
 case $1 in
-	"run") run_run ;;
+	"test") run_test ;;
 	*) print_help ;;
 esac
