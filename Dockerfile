@@ -1,6 +1,6 @@
 FROM ubuntu:14.04
 MAINTAINER Microfactory <info@microfactory.io>
-RUN apt-get update; apt-get install -y curl unzip;
+RUN apt-get update; apt-get install -y curl unzip git ;
 
 # install golang runtime
 RUN curl -L https://storage.googleapis.com/golang/go1.5.2.linux-amd64.tar.gz > /tmp/golang.tar.gz; tar -C /usr/local -xzf /tmp/golang.tar.gz; rm /tmp/golang.tar.gz
