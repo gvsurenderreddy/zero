@@ -151,24 +151,45 @@ func AuthorizeMember(memberid, membername, netid, endpoint, token string) error 
 	return nil
 }
 
-func WaitForIP(exit chan os.Signal, iface string) (net.IP, error) {
+func WaitForIP(exit chan os.Signal, installDir, netid, iface string) (net.IP, string, error) {
+	if iface == "" {
+		path := filepath.Join(installDir, "devicemap")
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, "", fmt.Errorf("Failed to open ZeroTier devicemap ('%s'): %v", path, err)
+		}
+
+		defer f.Close()
+		s := bufio.NewScanner(f)
+		for s.Scan() {
+			if strings.HasPrefix(s.Text(), netid) {
+				iface = strings.SplitAfter(s.Text(), "=")[1]
+			}
+
+		}
+
+		if err := s.Err(); err != nil {
+			return nil, "", err
+		}
+	}
+
 	retries := 0
 	for {
 		if retries >= 400 {
-			return nil, ErrMaxRetries
+			return nil, iface, ErrMaxRetries
 		}
 
 		i, err := net.InterfaceByName(iface)
 		if err != nil {
-			return nil, err
+			return nil, iface, err
 		}
 
 		addrs, err := i.Addrs()
 		if err != nil {
-			return nil, err
+			return nil, iface, err
 		}
 
-		if len(addrs) > 1 {
+		if len(addrs) > 0 {
 			for _, addr := range addrs {
 				ip, _, err := net.ParseCIDR(addr.String())
 				if err != nil {
@@ -176,7 +197,7 @@ func WaitForIP(exit chan os.Signal, iface string) (net.IP, error) {
 				}
 
 				if ip.To4() != nil {
-					return ip, nil
+					return ip, iface, nil //we're done here
 				}
 			}
 		}
@@ -184,15 +205,15 @@ func WaitForIP(exit chan os.Signal, iface string) (net.IP, error) {
 		retries += 1
 		select {
 		case <-exit:
-			return nil, ErrUserCancelled
+			return nil, iface, ErrUserCancelled
 		case <-time.After(time.Millisecond * 200):
 		}
 	}
 
-	return net.IP{}, nil
+	return net.IP{}, iface, nil
 }
 
-var iface = flag.String("iface", "zt0", "The network interface that is expected receive an address")
+var iface = flag.String("iface", "", "The network interface that is expected receive an address")
 var name = flag.String("name", "", "Give this member a descriptive name upon authorizing")
 var startDaemon = flag.Bool("start-daemon", false, "Also start the daemon (-d): this is for testing only")
 var installDir = flag.String("install-dir", "/var/lib/zerotier-one", "Where zerotier is installed")
@@ -235,11 +256,11 @@ func main() {
 		log.Fatalf("Failed to authorize member '%s': %v", memberid, err)
 	}
 
-	log.Printf("Waiting for network address on interface '%s'...", *iface)
-	ip, err := WaitForIP(exit, *iface)
+	log.Printf("Waiting for network address...")
+	ip, ipif, err := WaitForIP(exit, *installDir, netid, *iface)
 	if err != nil {
-		log.Fatalf("Failed to receive network address on '%s': %v", *iface, err)
+		log.Fatalf("Failed to receive network address: %v", err)
 	}
 
-	log.Printf("Done! Received address '%s'", ip.String())
+	log.Printf("Done! Received address '%s' on '%s'", ip.String(), ipif)
 }

@@ -3,7 +3,7 @@ set -e
 
 function print_help {
 	printf "Available Commands:\n";
-	printf "  run\n"
+	printf "  test\n"
 }
 
 function run_build_container {

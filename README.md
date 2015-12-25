@@ -21,3 +21,19 @@ go get -u github.com/microfactory/zero
 ```
 
 NOTE: This requires you to install the Go SDK (>1.5.1)
+
+## Configuration
+Zero supports several options to customize its behaviour:
+
+```
+-iface 			The network interface that is expected receive an address
+-name			Give this member a descriptive name upon authorizing
+-installDir 	Where zerotier is installed
+-api-endpoint	Location of the ZeroTier API
+```
+
+For example the following options allows us to run it on osx:
+
+```
+sudo zero -install-dir="/Library/Application Support/ZeroTier/One/" -name=macbook 7a9cd21e1ce5b740 EVekkAtG...yTHF2Mu
+```
